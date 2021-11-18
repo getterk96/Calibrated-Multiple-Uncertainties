@@ -264,12 +264,3 @@ class Ensemble(nn.Module):
             return y_1, y_2, y_3, y_4, y_5
 
         return y
-
-    def get_parameters(self) -> List[Dict]:
-        """A parameter list which decides optimization hyper-parameters,
-            such as the relative learning rate of each layer
-        """
-        params = [
-            {"params": self.parameters(), "lr_mult": 1.},
-        ]
-        return params

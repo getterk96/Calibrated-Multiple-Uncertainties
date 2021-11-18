@@ -28,6 +28,9 @@ from lib import StepwiseLR, get_entropy, get_confidence, get_consistency, norm, 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+import warnings
+warnings.simplefilter('ignore', UserWarning)
+
 
 def main(args: argparse.Namespace):
     if args.seed is not None:
@@ -41,6 +44,8 @@ def main(args: argparse.Namespace):
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     train_transform = transforms.Compose([
         ResizeImage(256),
+        # transforms.RandomAffine(degrees=30, translate=(0.1, 0.1), scale=(0.9, 1.1), shear=0.2, resample=Image.BICUBIC,
+        #                         fillcolor=(255, 255, 255)),
         transforms.RandomResizedCrop(224),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
@@ -77,7 +82,6 @@ def main(args: argparse.Namespace):
 
     train_source_iter = ForeverDataIterator(train_source_loader)
     train_target_iter = ForeverDataIterator(train_target_loader)
-    esem_iter1, esem_iter2, esem_iter3, esem_iter4, esem_iter5 = esem_dataloader(args, source_classes)
 
     # create model
     backbone = resnet50(pretrained=True)
@@ -98,19 +102,22 @@ def main(args: argparse.Namespace):
     lr_scheduler4 = StepwiseLR(optimizer_esem, init_lr=args.lr, gamma=0.001, decay_rate=0.75)
     lr_scheduler5 = StepwiseLR(optimizer_esem, init_lr=args.lr, gamma=0.001, decay_rate=0.75)
 
-    optimizer_pre = SGD(esem.get_parameters() + classifier.get_parameters(), args.lr, momentum=args.momentum,
-                        weight_decay=args.weight_decay, nesterov=True)
+    esem_iter1, esem_iter2, esem_iter3, esem_iter4, esem_iter5 = esem_dataloader(args, source_classes)
+
+    # source_class_weight = torch.zeros(len(source_classes)) + 0.5
+    source_class_weight = torch.cat((torch.ones(len(common_classes)), torch.zeros(len(source_private_classes))))
+    # target_class_weight = torch.cat((torch.zeros(len(common_classes)), torch.zeros(len(source_private_classes))))
 
     # define loss function
     domain_adv = DomainAdversarialLoss(domain_discri, reduction='none').to(device)
-
-    pretrain(esem_iter1, esem_iter2, esem_iter3, esem_iter4, esem_iter5, classifier,
-             esem, optimizer_pre, args)
 
     # start training
     best_acc1 = 0.
     for epoch in range(args.epochs):
         # train for one epoch
+
+        train(train_source_iter, train_target_iter, classifier, domain_adv, esem, optimizer,
+              lr_scheduler, epoch, source_class_weight, args)
 
         train_esem(esem_iter1, classifier, esem, optimizer_esem, lr_scheduler1, epoch, args, index=1)
         train_esem(esem_iter2, classifier, esem, optimizer_esem, lr_scheduler2, epoch, args, index=2)
@@ -118,10 +125,8 @@ def main(args: argparse.Namespace):
         train_esem(esem_iter4, classifier, esem, optimizer_esem, lr_scheduler4, epoch, args, index=4)
         train_esem(esem_iter5, classifier, esem, optimizer_esem, lr_scheduler5, epoch, args, index=5)
 
-        source_class_weight = evaluate_source_common(val_loader, classifier, esem, source_classes, args)
-
-        train(train_source_iter, train_target_iter, classifier, domain_adv, esem, optimizer,
-              lr_scheduler, epoch, source_class_weight, args)
+        # source_class_weight = evaluate_source_common(val_loader, classifier, esem, source_classes, args)
+        # evaluate_source_common(val_loader, classifier, esem, source_classes, args)
 
         # evaluate on validation set
         acc1 = validate(val_loader, classifier, esem, source_classes, args)
@@ -188,6 +193,13 @@ def train(train_source_iter: ForeverDataIterator, train_target_iter: ForeverData
             w_s = torch.tensor([source_class_weight[i] for i in labels_s]).to(device)
 
         cls_loss = F.cross_entropy(y_s, labels_s)
+
+        if epoch == 0:
+            w_t = single_entropy(F.softmax(y_t))
+        # if epoch == 0:
+        #     loss = cls_loss
+        #     domain_acc = torch.tensor([0])
+        # else:
         transfer_loss = domain_adv(f_s, f_t, w_s.detach(), w_t.to(device).detach())
         domain_acc = domain_adv.domain_discriminator_accuracy
         loss = cls_loss + transfer_loss * args.trade_off
@@ -229,6 +241,7 @@ def train_esem(train_source_iter, model, esem, optimizer, lr_scheduler, epoch, a
         x_s = x_s.to(device)
         labels_s = labels_s.to(device)
 
+        # compute output
         with torch.no_grad():
             y_s, f_s = model(x_s)
         y_s = esem(f_s.detach(), index)
@@ -244,7 +257,7 @@ def train_esem(train_source_iter, model, esem, optimizer, lr_scheduler, epoch, a
         loss.backward()
         optimizer.step()
 
-        if i % (args.print_freq * 5) == 0:
+        if i % args.print_freq == 0:
             progress.display(i)
 
 
@@ -272,6 +285,7 @@ def validate(val_loader: DataLoader, model: ImageClassifier, esem, source_classe
             confidece = get_confidence(yt_1, yt_2, yt_3, yt_4, yt_5)
             entropy = get_entropy(yt_1, yt_2, yt_3, yt_4, yt_5)
             consistency = get_consistency(yt_1, yt_2, yt_3, yt_4, yt_5)
+            # target_weight = (1 - entropy + 1 - consistency + confidece) / 3
 
             all_confidece.extend(confidece)
             all_consistency.extend(consistency)
@@ -332,6 +346,7 @@ def evaluate_source_common(val_loader: DataLoader, model: ImageClassifier, esem,
             confidece = get_confidence(yt_1, yt_2, yt_3, yt_4, yt_5)
             entropy = get_entropy(yt_1, yt_2, yt_3, yt_4, yt_5)
             consistency = get_consistency(yt_1, yt_2, yt_3, yt_4, yt_5)
+            # score = (1 - entropy + 1 - consistency + confidece) / 3
 
             all_confidece.extend(confidece)
             all_consistency.extend(consistency)
@@ -356,10 +371,10 @@ def evaluate_source_common(val_loader: DataLoader, model: ImageClassifier, esem,
     all_score = (all_confidece + 1 - all_consistency + 1 - all_entropy) / 3
 
     # args.threshold = torch.median(all_score)
-    # print('threshold = {}'.format(args.threshold))
+    print('threshold = {}'.format(args.threshold))
 
     for i in range(len(all_score)):
-        if all_score[i] >= args.threshold:
+        if all_score[i] >= (1.5 * args.threshold):
             source_weight += all_output[i]
             cnt += 1
         if all_labels[i] in source_classes:
@@ -367,6 +382,7 @@ def evaluate_source_common(val_loader: DataLoader, model: ImageClassifier, esem,
         else:
             target_private.append(all_score[i])
 
+    # print(score_common)
     hist, bin_edges = np.histogram(common, bins=10, range=(0, 1))
     print(hist)
     # print(bin_edges)
@@ -379,68 +395,6 @@ def evaluate_source_common(val_loader: DataLoader, model: ImageClassifier, esem,
     print('---source_weight---')
     print(source_weight)
     return source_weight
-
-
-def pretrain(esem_iter1, esem_iter2, esem_iter3, esem_iter4, esem_iter5, model, esem, optimizer, args):
-    losses = AverageMeter('Loss', ':6.2f')
-    cls_accs = AverageMeter('Cls Acc', ':3.1f')
-    progress = ProgressMeter(
-        args.iters_per_epoch,
-        [losses, cls_accs],
-        prefix="Esem: [{}-{}]".format(0, 0))
-
-    model.train()
-    esem.train()
-
-    for i in range(args.iters_per_epoch):
-        x_s1, labels_s1 = next(esem_iter1)
-        x_s1 = x_s1.to(device)
-        labels_s1 = labels_s1.to(device)
-        y_s1, f_s1 = model(x_s1)
-        y_s1 = esem(f_s1, index=1)
-        loss1 = F.cross_entropy(y_s1, labels_s1)
-
-        x_s2, labels_s2 = next(esem_iter2)
-        x_s2 = x_s2.to(device)
-        labels_s2 = labels_s2.to(device)
-        y_s2, f_s2 = model(x_s2)
-        y_s2 = esem(f_s2, index=2)
-        loss2 = F.cross_entropy(y_s2, labels_s2)
-
-        x_s3, labels_s3 = next(esem_iter3)
-        x_s3 = x_s3.to(device)
-        labels_s3 = labels_s3.to(device)
-        y_s3, f_s3 = model(x_s3)
-        y_s3 = esem(f_s3, index=3)
-        loss3 = F.cross_entropy(y_s3, labels_s3)
-
-        x_s4, labels_s4 = next(esem_iter4)
-        x_s4 = x_s4.to(device)
-        labels_s4 = labels_s4.to(device)
-        y_s4, f_s4 = model(x_s4)
-        y_s4 = esem(f_s4, index=1)
-        loss4 = F.cross_entropy(y_s4, labels_s4)
-
-        x_s5, labels_s5 = next(esem_iter5)
-        x_s5 = x_s5.to(device)
-        labels_s5 = labels_s5.to(device)
-        y_s5, f_s5 = model(x_s5)
-        y_s5 = esem(f_s5, index=1)
-        loss5 = F.cross_entropy(y_s5, labels_s5)
-
-        cls_acc = accuracy(y_s1, labels_s1)[0]
-        cls_accs.update(cls_acc.item(), x_s1.size(0))
-
-        loss = loss1 + loss2 + loss3 + loss4 + loss5
-        losses.update(loss.item(), x_s1.size(0))
-
-        # compute gradient and do SGD step
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-
-        if i % (args.print_freq * 5) == 0:
-            progress.display(i)
 
 
 if __name__ == '__main__':
