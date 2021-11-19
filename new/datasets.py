@@ -111,8 +111,8 @@ class Office31(ImageList):
 train_transform1 = Compose([
     Resize(256),
     RandomHorizontalFlip(),
-    RandomAffine(degrees=30, translate=(0.1, 0.1), scale=(0.9, 1.1), shear=0.2, resample=Image.BICUBIC,
-                 fillcolor=(255, 255, 255)),
+    RandomAffine(degrees=30, translate=(0.1, 0.1), scale=(0.9, 1.1), shear=0.2, interpolation=InterpolationMode.BICUBIC,
+                 fill=(255, 255, 255)),
     CenterCrop(224),
     RandomGrayscale(p=0.5),
     ToTensor(),
@@ -135,8 +135,8 @@ train_transform2 = Compose([
 train_transform3 = Compose([
     Resize(256),
     RandomHorizontalFlip(),
-    RandomAffine(degrees=30, translate=(0.1, 0.1), scale=(0.9, 1.1), shear=0.2, resample=Image.BICUBIC,
-                 fillcolor=(255, 255, 255)),
+    RandomAffine(degrees=30, translate=(0.1, 0.1), scale=(0.9, 1.1), shear=0.2, interpolation=InterpolationMode.BICUBIC,
+                 fill=(255, 255, 255)),
     FiveCrop(224),
     Lambda(lambda crops: crops[1]),
     ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.2),
@@ -148,8 +148,8 @@ train_transform3 = Compose([
 train_transform4 = Compose([
     Resize(256),
     RandomHorizontalFlip(),
-    RandomAffine(degrees=10, translate=(0.1, 0.1), scale=(0.9, 1.1), shear=0.1, resample=Image.BICUBIC,
-                 fillcolor=(255, 255, 255)),
+    RandomAffine(degrees=10, translate=(0.1, 0.1), scale=(0.9, 1.1), shear=0.1, interpolation=InterpolationMode.BICUBIC,
+                 fill=(255, 255, 255)),
     RandomPerspective(),
     FiveCrop(224),
     Lambda(lambda crops: crops[2]),
