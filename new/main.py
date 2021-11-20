@@ -1,21 +1,20 @@
-import random
-import time
-import warnings
-import sys
 import argparse
 import copy
+import os
+import random
+import sys
+import time
 
+import numpy as np
 import torch
-import torch.nn.parallel
 import torch.backends.cudnn as cudnn
-from torch.optim import SGD
+import torch.nn.functional as F
+import torch.nn.parallel
 import torch.utils.data
-from torch.utils.data import DataLoader
 import torch.utils.data.distributed
 import torchvision.transforms as transforms
-import torch.nn.functional as F
-import numpy as np
-from PIL import Image
+from torch.optim import SGD
+from torch.utils.data import DataLoader
 
 sys.path.append('.')
 from model import DomainDiscriminator, Ensemble
@@ -29,6 +28,7 @@ from lib import StepwiseLR, get_entropy, get_confidence, get_consistency, norm, 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 import warnings
+
 warnings.simplefilter('ignore', UserWarning)
 
 
@@ -102,14 +102,32 @@ def main(args: argparse.Namespace):
     lr_scheduler4 = StepwiseLR(optimizer_esem, init_lr=args.lr, gamma=0.001, decay_rate=0.75)
     lr_scheduler5 = StepwiseLR(optimizer_esem, init_lr=args.lr, gamma=0.001, decay_rate=0.75)
 
+    optimizer_pre = SGD(esem.get_parameters() + classifier.get_parameters(), args.lr, momentum=args.momentum,
+                        weight_decay=args.weight_decay, nesterov=True)
+    lr_scheduler_pre = StepwiseLR(optimizer_pre, init_lr=args.lr, gamma=0.001, decay_rate=0.75)
+
     esem_iter1, esem_iter2, esem_iter3, esem_iter4, esem_iter5 = esem_dataloader(args, source_classes)
 
     # source_class_weight = torch.zeros(len(source_classes)) + 0.5
-    source_class_weight = torch.cat((torch.ones(len(common_classes)), torch.zeros(len(source_private_classes))))
+    # source_class_weight = torch.cat((torch.ones(len(common_classes)), torch.zeros(len(source_private_classes))))
     # target_class_weight = torch.cat((torch.zeros(len(common_classes)), torch.zeros(len(source_private_classes))))
 
     # define loss function
     domain_adv = DomainAdversarialLoss(domain_discri, reduction='none').to(device)
+
+    _, ds, src = args.source.split('/')
+    _, _, tgt = args.target.split('/')
+    scw_path = f"data/{ds}/scw_{src[:-4]}_{tgt[:-4]}.npy"
+    if not os.path.exists(scw_path):
+        for epoch in range(args.pre_epochs):
+            pretrain(esem_iter1, esem_iter2, esem_iter3, esem_iter4, esem_iter5, classifier,
+                     esem, optimizer_pre, lr_scheduler_pre, epoch, args)
+
+        source_class_weight = evaluate_source_common(val_loader, classifier, esem, source_classes, args)
+
+        np.save(scw_path, source_class_weight.detach().cpu().numpy())
+    else:
+        source_class_weight = torch.from_numpy(np.load(scw_path)).to(device)
 
     # start training
     best_acc1 = 0.
@@ -125,9 +143,6 @@ def main(args: argparse.Namespace):
         train_esem(esem_iter4, classifier, esem, optimizer_esem, lr_scheduler4, epoch, args, index=4)
         train_esem(esem_iter5, classifier, esem, optimizer_esem, lr_scheduler5, epoch, args, index=5)
 
-        # source_class_weight = evaluate_source_common(val_loader, classifier, esem, source_classes, args)
-        # evaluate_source_common(val_loader, classifier, esem, source_classes, args)
-
         # evaluate on validation set
         acc1 = validate(val_loader, classifier, esem, source_classes, args)
 
@@ -142,6 +157,91 @@ def main(args: argparse.Namespace):
     classifier.load_state_dict(best_model)
     acc1 = validate(test_loader, classifier, esem, source_classes, args)
     print("test_acc1 = {:3.3f}".format(acc1))
+
+
+def pretrain(esem_iter1, esem_iter2, esem_iter3, esem_iter4, esem_iter5, model, esem, optimizer_pre, lr_scheduler_pre,
+             epoch, args):
+    losses = AverageMeter('Loss', ':6.2f')
+    cls_accs = AverageMeter('Cls Acc', ':3.1f')
+    progress = ProgressMeter(
+        args.iters_per_epoch,
+        [losses, cls_accs],
+        prefix="Pre: [{}]".format(epoch))
+
+    model.train()
+    esem.train()
+
+    for i in range(args.iters_per_epoch):
+        lr_scheduler_pre.step()
+
+        x_s1, labels_s1 = next(esem_iter1)
+        x_s1 = x_s1.to(device)
+        labels_s1 = labels_s1.to(device)
+        y_s1, f_s1 = model(x_s1)
+        y_s1 = esem(f_s1, index=1)
+        loss1 = F.cross_entropy(y_s1, labels_s1)
+
+        # compute gradient and do SGD step
+        optimizer_pre.zero_grad()
+        loss1.backward()
+        optimizer_pre.step()
+
+        x_s2, labels_s2 = next(esem_iter2)
+        x_s2 = x_s2.to(device)
+        labels_s2 = labels_s2.to(device)
+        y_s2, f_s2 = model(x_s2)
+        y_s2 = esem(f_s2, index=2)
+        loss2 = F.cross_entropy(y_s2, labels_s2)
+
+        # compute gradient and do SGD step
+        optimizer_pre.zero_grad()
+        loss2.backward()
+        optimizer_pre.step()
+
+        x_s3, labels_s3 = next(esem_iter3)
+        x_s3 = x_s3.to(device)
+        labels_s3 = labels_s3.to(device)
+        y_s3, f_s3 = model(x_s3)
+        y_s3 = esem(f_s3, index=3)
+        loss3 = F.cross_entropy(y_s3, labels_s3)
+
+        # compute gradient and do SGD step
+        optimizer_pre.zero_grad()
+        loss3.backward()
+        optimizer_pre.step()
+
+        x_s4, labels_s4 = next(esem_iter4)
+        x_s4 = x_s4.to(device)
+        labels_s4 = labels_s4.to(device)
+        y_s4, f_s4 = model(x_s4)
+        y_s4 = esem(f_s4, index=4)
+        loss4 = F.cross_entropy(y_s4, labels_s4)
+
+        # compute gradient and do SGD step
+        optimizer_pre.zero_grad()
+        loss4.backward()
+        optimizer_pre.step()
+
+        x_s5, labels_s5 = next(esem_iter5)
+        x_s5 = x_s5.to(device)
+        labels_s5 = labels_s5.to(device)
+        y_s5, f_s5 = model(x_s5)
+        y_s5 = esem(f_s5, index=5)
+        loss5 = F.cross_entropy(y_s5, labels_s5)
+
+        # compute gradient and do SGD step
+        optimizer_pre.zero_grad()
+        loss5.backward()
+        optimizer_pre.step()
+
+        cls_acc = accuracy(y_s1, labels_s1)[0]
+        cls_accs.update(cls_acc.item(), x_s1.size(0))
+
+        loss = loss1 + loss2 + loss3 + loss4 + loss5
+        losses.update(loss.item(), x_s1.size(0))
+
+        if i % (args.print_freq * 5) == 0:
+            progress.display(i)
 
 
 def train(train_source_iter: ForeverDataIterator, train_target_iter: ForeverDataIterator,
@@ -371,10 +471,10 @@ def evaluate_source_common(val_loader: DataLoader, model: ImageClassifier, esem,
     all_score = (all_confidece + 1 - all_consistency + 1 - all_entropy) / 3
 
     # args.threshold = torch.median(all_score)
-    print('threshold = {}'.format(args.threshold))
+    print('source_threshold = {}'.format(args.source_threshold))
 
     for i in range(len(all_score)):
-        if all_score[i] >= (1.5 * args.threshold):
+        if all_score[i] >= args.source_threshold:
             source_weight += all_output[i]
             cnt += 1
         if all_labels[i] in source_classes:
@@ -407,6 +507,8 @@ if __name__ == '__main__':
     parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet50')
     parser.add_argument('-j', '--workers', default=2, type=int, metavar='N',
                         help='number of data loading workers (default: 4)')
+    parser.add_argument('--pre_epochs', default=1, type=int, metavar='N',
+                        help='number of pretrain epochs to run')
     parser.add_argument('--epochs', default=20, type=int, metavar='N',
                         help='number of total epochs to run')
     parser.add_argument('-b', '--batch-size', default=32, type=int,
@@ -431,7 +533,7 @@ if __name__ == '__main__':
     parser.add_argument('--n_source_private', type=int, default=10, help=" ")
     parser.add_argument('--n_total', type=int, default=31, help=" ")
     parser.add_argument('--threshold', type=float, default=0.5, help=" ")
-
+    parser.add_argument('--source_threshold', type=float, default=0.7, help=" ")
     args = parser.parse_args()
     print(args)
     main(args)
