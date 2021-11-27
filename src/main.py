@@ -23,7 +23,7 @@ import datasets
 from datasets import esem_dataloader
 from lib import AverageMeter, ProgressMeter, accuracy, ForeverDataIterator, AccuracyCounter
 from lib import ResizeImage
-from lib import StepwiseLR, get_entropy, get_confidence, get_consistency, norm, single_entropy
+from lib import StepwiseLR, get_entropy, get_confidence, norm, single_entropy
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -140,7 +140,7 @@ def main(args: argparse.Namespace):
     #
     #     source_class_weight = evaluate_source_common(val_loader, classifier, esem, source_classes, args)
 
-    source_class_weight = torch.cat(torch.ones(len(common_classes)), torch.zeros(len(source_private_classes)))
+    source_class_weight = torch.cat([torch.ones(len(common_classes)), torch.zeros(len(source_private_classes))])
     # mask = torch.where(source_class_weight > 0.2)
     # source_class_weight = torch.zeros_like(source_class_weight)
     # source_class_weight[mask] = 1
@@ -291,8 +291,8 @@ def train(train_source_iter: ForeverDataIterator, train_target_iter: ForeverData
             yt_1, yt_2, yt_3, yt_4, yt_5 = esem(f_t)
             confidence = get_confidence(yt_1, yt_2, yt_3, yt_4, yt_5)
             entropy = get_entropy(yt_1, yt_2, yt_3, yt_4, yt_5)
-            consistency = get_consistency(yt_1, yt_2, yt_3, yt_4, yt_5)
-            w_t = (1 - entropy + 1 - consistency + confidence) / 3
+            # consistency = get_consistency(yt_1, yt_2, yt_3, yt_4, yt_5)
+            w_t = (1 - entropy + confidence) / 3
             w_s = torch.tensor([source_class_weight[i] for i in labels_s]).to(device)
 
         cls_loss = F.cross_entropy(y_s, labels_s)
@@ -371,7 +371,7 @@ def validate(val_loader: DataLoader, model: ImageClassifier, esem, source_classe
     esem.eval()
 
     all_confidece = list()
-    all_consistency = list()
+    # all_consistency = list()
     all_entropy = list()
     all_indices = list()
     all_labels = list()
@@ -387,19 +387,18 @@ def validate(val_loader: DataLoader, model: ImageClassifier, esem, source_classe
             yt_1, yt_2, yt_3, yt_4, yt_5 = esem(f)
             confidece = get_confidence(yt_1, yt_2, yt_3, yt_4, yt_5)
             entropy = get_entropy(yt_1, yt_2, yt_3, yt_4, yt_5)
-            consistency = get_consistency(yt_1, yt_2, yt_3, yt_4, yt_5)
+            # consistency = get_consistency(yt_1, yt_2, yt_3, yt_4, yt_5)
             # target_weight = (1 - entropy + 1 - consistency + confidece) / 3
 
             all_confidece.extend(confidece)
-            all_consistency.extend(consistency)
+            # all_consistency.extend(consistency)
             all_entropy.extend(entropy)
             all_indices.extend(indices)
             all_labels.extend(labels)
 
     all_confidece = norm(torch.tensor(all_confidece))
-    all_consistency = norm(torch.tensor(all_consistency))
     all_entropy = norm(torch.tensor(all_entropy))
-    all_score = (all_confidece + 1 - all_consistency + 1 - all_entropy) / 3
+    all_score = (all_confidece + 1 - all_entropy) / 3
 
     counters = AccuracyCounter(len(source_classes) + 1)
     for (each_indice, each_label, score) in zip(all_indices, all_labels, all_score):
@@ -431,7 +430,7 @@ def evaluate_source_common(val_loader: DataLoader, model: ImageClassifier, esem,
     target_private = []
 
     all_confidece = list()
-    all_consistency = list()
+    # all_consistency = list()
     all_entropy = list()
     all_labels = list()
     all_output = list()
@@ -448,11 +447,11 @@ def evaluate_source_common(val_loader: DataLoader, model: ImageClassifier, esem,
             yt_1, yt_2, yt_3, yt_4, yt_5 = esem(f)
             confidece = get_confidence(yt_1, yt_2, yt_3, yt_4, yt_5)
             entropy = get_entropy(yt_1, yt_2, yt_3, yt_4, yt_5)
-            consistency = get_consistency(yt_1, yt_2, yt_3, yt_4, yt_5)
+            # consistency = get_consistency(yt_1, yt_2, yt_3, yt_4, yt_5)
             # score = (1 - entropy + 1 - consistency + confidece) / 3
 
             all_confidece.extend(confidece)
-            all_consistency.extend(consistency)
+            # all_consistency.extend(consistency)
             all_entropy.extend(entropy)
             all_labels.extend(labels)
 
@@ -469,9 +468,9 @@ def evaluate_source_common(val_loader: DataLoader, model: ImageClassifier, esem,
             #     target_private.append(each_score)
 
     all_confidece = norm(torch.tensor(all_confidece))
-    all_consistency = norm(torch.tensor(all_consistency))
+    # all_consistency = norm(torch.tensor(all_consistency))
     all_entropy = norm(torch.tensor(all_entropy))
-    all_score = (all_confidece + 1 - all_consistency + 1 - all_entropy) / 3
+    all_score = (all_confidece + 1 - all_entropy) / 3
 
     # args.threshold = torch.median(all_score)
     print('source_threshold = {}'.format(args.source_threshold))
@@ -507,7 +506,7 @@ if __name__ == '__main__':
     parser.add_argument('-s', '--source', help='source domain(s)')
     parser.add_argument('-t', '--target', help='target domain(s)')
     parser.add_argument('-a', '--arch', default='resnet50', help='backbone selected')
-    parser.add_argument('-j', '--workers', default=2, type=int, help='number of data loading workers (default: 4)')
+    parser.add_argument('-j', '--workers', default=4, type=int, help='number of data loading workers (default: 4)')
     parser.add_argument('--pre_epochs', default=5, type=int, help='number of pretrain epochs to run')
     parser.add_argument('--epochs', default=20, type=int, help='number of total epochs to run')
     parser.add_argument('-b', '--batch_size', default=32, type=int, help='mini-batch size (default: 32)')
