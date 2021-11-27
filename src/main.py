@@ -115,19 +115,36 @@ def main(args: argparse.Namespace):
     # define loss function
     domain_adv = DomainAdversarialLoss(domain_discri, reduction='none').to(device)
 
-    _, ds, src = args.source.split('/')
-    _, _, tgt = args.target.split('/')
-    scw_path = f"data/{ds}/scw_{src[:-4]}_{tgt[:-4]}.npy"
-    if not os.path.exists(scw_path):
-        for epoch in range(args.pre_epochs):
-            pretrain(esem_iter1, esem_iter2, esem_iter3, esem_iter4, esem_iter5, classifier,
-                     esem, optimizer_pre, lr_scheduler_pre, epoch, args)
+    # _, ds, src = args.source.split('/')
+    # _, _, tgt = args.target.split('/')
+    #
+    # if not os.path.exists(f"models/{ds}"):
+    #     os.mkdir(f"models/{ds}")
+    #
+    # pretrain_model_path = f"models/{ds}/scw_{src[:-4]}_{tgt[:-4]}_pretrain.pth"
+    # if not os.path.exists(pretrain_model_path):
+    #     for epoch in range(args.pre_epochs):
+    #         pretrain(train_source_iter, esem_iter1, esem_iter2, esem_iter3, esem_iter4, esem_iter5, classifier,
+    #                  esem, optimizer_pre, args, epoch, lr_scheduler_pre)
+    #
+    #         source_class_weight = evaluate_source_common(val_loader, classifier, esem, source_classes, args)
+    #
+    #     state = {'classifier': classifier.state_dict(), 'esem': esem.state_dict()}
+    #
+    #     torch.save(state, pretrain_model_path)
+    # else:
+    #     checkpoint = torch.load(pretrain_model_path)
+    #
+    #     classifier.load_state_dict(checkpoint['classifier'])
+    #     esem.load_state_dict(checkpoint['esem'])
+    #
+    #     source_class_weight = evaluate_source_common(val_loader, classifier, esem, source_classes, args)
 
-        source_class_weight = evaluate_source_common(val_loader, classifier, esem, source_classes, args)
-
-        np.save(scw_path, source_class_weight.detach().cpu().numpy())
-    else:
-        source_class_weight = torch.from_numpy(np.load(scw_path)).to(device)
+    source_class_weight = torch.cat(torch.ones(len(common_classes)), torch.zeros(len(source_private_classes)))
+    # mask = torch.where(source_class_weight > 0.2)
+    # source_class_weight = torch.zeros_like(source_class_weight)
+    # source_class_weight[mask] = 1
+    print(source_class_weight)
 
     # start training
     best_acc1 = 0.
@@ -159,8 +176,8 @@ def main(args: argparse.Namespace):
     print("test_acc1 = {:3.3f}".format(acc1))
 
 
-def pretrain(esem_iter1, esem_iter2, esem_iter3, esem_iter4, esem_iter5, model, esem, optimizer_pre, lr_scheduler_pre,
-             epoch, args):
+def pretrain(train_source_iter: ForeverDataIterator, esem_iter1, esem_iter2, esem_iter3, esem_iter4, esem_iter5, model,
+             esem, optimizer, args, epoch, lr_scheduler):
     losses = AverageMeter('Loss', ':6.2f')
     cls_accs = AverageMeter('Cls Acc', ':3.1f')
     progress = ProgressMeter(
@@ -172,7 +189,13 @@ def pretrain(esem_iter1, esem_iter2, esem_iter3, esem_iter4, esem_iter5, model, 
     esem.train()
 
     for i in range(args.iters_per_epoch):
-        lr_scheduler_pre.step()
+        lr_scheduler.step()
+
+        x_s, labels_s = next(train_source_iter)
+        x_s = x_s.to(device)
+        labels_s = labels_s.to(device)
+        y_s, f_s = model(x_s)
+        cls_loss = F.cross_entropy(y_s, labels_s)
 
         x_s1, labels_s1 = next(esem_iter1)
         x_s1 = x_s1.to(device)
@@ -181,22 +204,12 @@ def pretrain(esem_iter1, esem_iter2, esem_iter3, esem_iter4, esem_iter5, model, 
         y_s1 = esem(f_s1, index=1)
         loss1 = F.cross_entropy(y_s1, labels_s1)
 
-        # compute gradient and do SGD step
-        optimizer_pre.zero_grad()
-        loss1.backward()
-        optimizer_pre.step()
-
         x_s2, labels_s2 = next(esem_iter2)
         x_s2 = x_s2.to(device)
         labels_s2 = labels_s2.to(device)
         y_s2, f_s2 = model(x_s2)
         y_s2 = esem(f_s2, index=2)
         loss2 = F.cross_entropy(y_s2, labels_s2)
-
-        # compute gradient and do SGD step
-        optimizer_pre.zero_grad()
-        loss2.backward()
-        optimizer_pre.step()
 
         x_s3, labels_s3 = next(esem_iter3)
         x_s3 = x_s3.to(device)
@@ -205,22 +218,12 @@ def pretrain(esem_iter1, esem_iter2, esem_iter3, esem_iter4, esem_iter5, model, 
         y_s3 = esem(f_s3, index=3)
         loss3 = F.cross_entropy(y_s3, labels_s3)
 
-        # compute gradient and do SGD step
-        optimizer_pre.zero_grad()
-        loss3.backward()
-        optimizer_pre.step()
-
         x_s4, labels_s4 = next(esem_iter4)
         x_s4 = x_s4.to(device)
         labels_s4 = labels_s4.to(device)
         y_s4, f_s4 = model(x_s4)
         y_s4 = esem(f_s4, index=4)
         loss4 = F.cross_entropy(y_s4, labels_s4)
-
-        # compute gradient and do SGD step
-        optimizer_pre.zero_grad()
-        loss4.backward()
-        optimizer_pre.step()
 
         x_s5, labels_s5 = next(esem_iter5)
         x_s5 = x_s5.to(device)
@@ -229,18 +232,18 @@ def pretrain(esem_iter1, esem_iter2, esem_iter3, esem_iter4, esem_iter5, model, 
         y_s5 = esem(f_s5, index=5)
         loss5 = F.cross_entropy(y_s5, labels_s5)
 
-        # compute gradient and do SGD step
-        optimizer_pre.zero_grad()
-        loss5.backward()
-        optimizer_pre.step()
-
         cls_acc = accuracy(y_s1, labels_s1)[0]
         cls_accs.update(cls_acc.item(), x_s1.size(0))
 
-        loss = loss1 + loss2 + loss3 + loss4 + loss5
+        loss = loss1 + loss2 + loss3 + loss4 + loss5 + cls_loss
         losses.update(loss.item(), x_s1.size(0))
 
-        if i % (args.print_freq * 5) == 0:
+        # compute gradient and do SGD step
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        if i % (args.print_freq) == 0:
             progress.display(i)
 
 
@@ -483,11 +486,11 @@ def evaluate_source_common(val_loader: DataLoader, model: ImageClassifier, esem,
             target_private.append(all_score[i])
 
     # print(score_common)
-    hist, bin_edges = np.histogram(common, bins=10, range=(0, 1))
+    hist, bin_edges = np.histogram(common, bins=20, range=(0, 1))
     print(hist)
     # print(bin_edges)
 
-    hist, bin_edges = np.histogram(target_private, bins=10, range=(0, 1))
+    hist, bin_edges = np.histogram(target_private, bins=20, range=(0, 1))
     print(hist)
     # print(bin_edges)
 
@@ -499,41 +502,27 @@ def evaluate_source_common(val_loader: DataLoader, model: ImageClassifier, esem,
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='PyTorch Domain Adaptation')
-    parser.add_argument('root', metavar='DIR',
-                        help='root path of dataset')
-    parser.add_argument('-d', '--data', metavar='DATA', default='Office31')
+    parser.add_argument('root', help='root path of dataset')
+    parser.add_argument('-d', '--data', default='Office31', help='dataset selected')
     parser.add_argument('-s', '--source', help='source domain(s)')
     parser.add_argument('-t', '--target', help='target domain(s)')
-    parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet50')
-    parser.add_argument('-j', '--workers', default=2, type=int, metavar='N',
-                        help='number of data loading workers (default: 4)')
-    parser.add_argument('--pre_epochs', default=1, type=int, metavar='N',
-                        help='number of pretrain epochs to run')
-    parser.add_argument('--epochs', default=20, type=int, metavar='N',
-                        help='number of total epochs to run')
-    parser.add_argument('-b', '--batch-size', default=32, type=int,
-                        metavar='N',
-                        help='mini-batch size (default: 32)')
-    parser.add_argument('--lr', '--learning-rate', default=0.01, type=float,
-                        metavar='LR', help='initial learning rate', dest='lr')
-    parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
-                        help='momentum')
-    parser.add_argument('--wd', '--weight-decay', default=1e-3, type=float,
-                        metavar='W', help='weight decay (default: 1e-3)',
-                        dest='weight_decay')
-    parser.add_argument('-p', '--print-freq', default=100, type=int,
-                        metavar='N', help='print frequency (default: 100)')
-    parser.add_argument('--seed', default=None, type=int,
-                        help='seed for initializing training. ')
-    parser.add_argument('--trade-off', default=1., type=float,
-                        help='the trade-off hyper-parameter for transfer loss')
-    parser.add_argument('-i', '--iters-per-epoch', default=1000, type=int,
-                        help='Number of iterations per epoch')
-    parser.add_argument('--n_share', type=int, default=10, help=" ")
-    parser.add_argument('--n_source_private', type=int, default=10, help=" ")
-    parser.add_argument('--n_total', type=int, default=31, help=" ")
-    parser.add_argument('--threshold', type=float, default=0.5, help=" ")
-    parser.add_argument('--source_threshold', type=float, default=0.7, help=" ")
+    parser.add_argument('-a', '--arch', default='resnet50', help='backbone selected')
+    parser.add_argument('-j', '--workers', default=2, type=int, help='number of data loading workers (default: 4)')
+    parser.add_argument('--pre_epochs', default=5, type=int, help='number of pretrain epochs to run')
+    parser.add_argument('--epochs', default=20, type=int, help='number of total epochs to run')
+    parser.add_argument('-b', '--batch_size', default=32, type=int, help='mini-batch size (default: 32)')
+    parser.add_argument('--lr', '--learning_rate', default=0.01, type=float, help='initial learning rate', dest='lr')
+    parser.add_argument('--momentum', default=0.9, type=float, help='momentum')
+    parser.add_argument('--wd', '--weight_decay', default=1e-3, type=float, help='weight decay (default: 1e-3)', dest='weight_decay')
+    parser.add_argument('-p', '--print_freq', default=100, type=int, help='print frequency (default: 100)')
+    parser.add_argument('--seed', default=None, type=int, help='seed for initializing training. ')
+    parser.add_argument('--trade_off', default=1., type=float, help='the trade-off hyper-parameter for transfer loss')
+    parser.add_argument('-i', '--iters_per_epoch', default=1000, type=int, help='Number of iterations per epoch')
+    parser.add_argument('--n_share', default=10, type=int, help=" ")
+    parser.add_argument('--n_source_private', default=10, type=int, help=" ")
+    parser.add_argument('--n_total', default=31, type=int, help=" ")
+    parser.add_argument('--threshold', default=0.5, type=float, help=" ")
+    parser.add_argument('--source_threshold', default=0.5, type=float, help=" ")
     args = parser.parse_args()
     print(args)
     main(args)
