@@ -3,6 +3,7 @@ echo $$
 device=5
 threshold=0.6
 src_threshold=0.85
+comment=$1
 
 CUDA_VISIBLE_DEVICES=$device python3 src/main.py /data/office -d Office31 \
     -s data/office/webcam.txt \
