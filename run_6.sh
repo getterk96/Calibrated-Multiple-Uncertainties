@@ -1,7 +1,7 @@
 echo $$
 
 device=6
-threshold=0.6
+threshold=$2
 src_threshold=0.85
 comment=$1
 

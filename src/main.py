@@ -1,6 +1,5 @@
 import argparse
 import copy
-import os
 import random
 import sys
 import time
@@ -23,7 +22,7 @@ import datasets
 from datasets import esem_dataloader
 from lib import AverageMeter, ProgressMeter, accuracy, ForeverDataIterator, AccuracyCounter
 from lib import ResizeImage
-from lib import StepwiseLR, get_entropy, get_confidence, norm, single_entropy
+from lib import StepwiseLR, get_entropy, get_marginal_confidence, norm
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -33,6 +32,7 @@ warnings.simplefilter('ignore', UserWarning)
 
 
 def main(args: argparse.Namespace):
+    begin = time.time()
     if args.seed is not None:
         random.seed(args.seed)
         torch.manual_seed(args.seed)
@@ -141,6 +141,8 @@ def main(args: argparse.Namespace):
     #     source_class_weight = evaluate_source_common(val_loader, classifier, esem, source_classes, args)
 
     source_class_weight = torch.cat([torch.ones(len(common_classes)), torch.zeros(len(source_private_classes))])
+    target_score_upper = torch.zeros(1).to(device)
+    target_score_lower = torch.zeros(1).to(device)
     # mask = torch.where(source_class_weight > 0.2)
     # source_class_weight = torch.zeros_like(source_class_weight)
     # source_class_weight[mask] = 1
@@ -151,8 +153,9 @@ def main(args: argparse.Namespace):
     for epoch in range(args.epochs):
         # train for one epoch
 
-        train(train_source_iter, train_target_iter, classifier, domain_adv, esem, optimizer,
-              lr_scheduler, epoch, source_class_weight, args)
+        target_score_upper, target_score_lower = train(train_source_iter, train_target_iter, classifier, domain_adv,
+                                                       esem, optimizer, lr_scheduler, epoch, source_class_weight,
+                                                       target_score_upper, target_score_lower, args)
 
         train_esem(esem_iter1, classifier, esem, optimizer_esem, lr_scheduler1, epoch, args, index=1)
         train_esem(esem_iter2, classifier, esem, optimizer_esem, lr_scheduler2, epoch, args, index=2)
@@ -174,6 +177,8 @@ def main(args: argparse.Namespace):
     classifier.load_state_dict(best_model)
     acc1 = validate(test_loader, classifier, esem, source_classes, args)
     print("test_acc1 = {:3.3f}".format(acc1))
+    end = time.time()
+    print(f"Total experiment time: {(end - begin) // 60}min")
 
 
 def pretrain(train_source_iter: ForeverDataIterator, esem_iter1, esem_iter2, esem_iter3, esem_iter4, esem_iter5, model,
@@ -249,15 +254,17 @@ def pretrain(train_source_iter: ForeverDataIterator, esem_iter1, esem_iter2, ese
 
 def train(train_source_iter: ForeverDataIterator, train_target_iter: ForeverDataIterator,
           model: ImageClassifier, domain_adv: DomainAdversarialLoss, esem, optimizer: SGD,
-          lr_scheduler: StepwiseLR, epoch: int, source_class_weight, args: argparse.Namespace):
-    batch_time = AverageMeter('Time', ':5.2f')
-    data_time = AverageMeter('Data', ':5.2f')
-    losses = AverageMeter('Loss', ':6.2f')
-    cls_accs = AverageMeter('Cls Acc', ':3.1f')
-    domain_accs = AverageMeter('Domain Acc', ':3.1f')
+          lr_scheduler: StepwiseLR, epoch: int, source_class_weight, target_score_upper, target_score_lower,
+          args: argparse.Namespace):
+    batch_time = AverageMeter('Time', ':4.2f')
+    losses = AverageMeter('Loss', ':4.2f')
+    cls_accs = AverageMeter('Cls Acc', ':4.1f')
+    domain_accs = AverageMeter('Domain Acc', ':4.1f')
+    score_upper = AverageMeter('Score Upper', ':4.2f')
+    score_lower = AverageMeter('Score Lower', ':4.2f')
     progress = ProgressMeter(
         args.iters_per_epoch,
-        [batch_time, data_time, losses, cls_accs, domain_accs],
+        [batch_time, losses, cls_accs, domain_accs, score_upper, score_lower],
         prefix="Epoch: [{}]".format(epoch))
 
     # switch to train mode
@@ -268,9 +275,6 @@ def train(train_source_iter: ForeverDataIterator, train_target_iter: ForeverData
     end = time.time()
     for i in range(args.iters_per_epoch):
         lr_scheduler.step()
-
-        # measure data loading time
-        data_time.update(time.time() - end)
 
         x_s, labels_s = next(train_source_iter)
         x_t, _ = next(train_target_iter)
@@ -289,16 +293,17 @@ def train(train_source_iter: ForeverDataIterator, train_target_iter: ForeverData
 
         with torch.no_grad():
             yt_1, yt_2, yt_3, yt_4, yt_5 = esem(f_t)
-            confidence = get_confidence(yt_1, yt_2, yt_3, yt_4, yt_5)
+            confidence = get_marginal_confidence(yt_1, yt_2, yt_3, yt_4, yt_5)
             entropy = get_entropy(yt_1, yt_2, yt_3, yt_4, yt_5)
             # consistency = get_consistency(yt_1, yt_2, yt_3, yt_4, yt_5)
-            w_t = (1 - entropy + confidence) / 3
+            w_t = (1 - entropy + confidence) / 2
+            target_score_upper = target_score_upper * 0.01 + w_t.max() * 0.99
+            target_score_lower = target_score_lower * 0.01 + w_t.min() * 0.99
+            w_t = (w_t - target_score_lower) / (target_score_upper - target_score_lower)
             w_s = torch.tensor([source_class_weight[i] for i in labels_s]).to(device)
 
         cls_loss = F.cross_entropy(y_s, labels_s)
 
-        if epoch == 0:
-            w_t = single_entropy(F.softmax(y_t))
         # if epoch == 0:
         #     loss = cls_loss
         #     domain_acc = torch.tensor([0])
@@ -312,6 +317,8 @@ def train(train_source_iter: ForeverDataIterator, train_target_iter: ForeverData
         losses.update(loss.item(), x_s.size(0))
         cls_accs.update(cls_acc.item(), x_s.size(0))
         domain_accs.update(domain_acc.item(), x_s.size(0))
+        score_upper.update(target_score_upper.item(), 1)
+        score_lower.update(target_score_lower.item(), 1)
 
         # compute gradient and do SGD step
         optimizer.zero_grad()
@@ -325,12 +332,14 @@ def train(train_source_iter: ForeverDataIterator, train_target_iter: ForeverData
         if i % args.print_freq == 0:
             progress.display(i)
 
+    return target_score_upper, target_score_lower
+
 
 def train_esem(train_source_iter, model, esem, optimizer, lr_scheduler, epoch, args, index):
-    losses = AverageMeter('Loss', ':6.2f')
-    cls_accs = AverageMeter('Cls Acc', ':3.1f')
+    losses = AverageMeter('Loss', ':4.2f')
+    cls_accs = AverageMeter('Cls Acc', ':5.1f')
     progress = ProgressMeter(
-        args.iters_per_epoch,
+        args.iters_per_epoch // 2,
         [losses, cls_accs],
         prefix="Esem: [{}-{}]".format(epoch, index))
 
@@ -385,7 +394,7 @@ def validate(val_loader: DataLoader, model: ImageClassifier, esem, source_classe
             values, indices = torch.max(F.softmax(output, -1), 1)
 
             yt_1, yt_2, yt_3, yt_4, yt_5 = esem(f)
-            confidece = get_confidence(yt_1, yt_2, yt_3, yt_4, yt_5)
+            confidece = get_marginal_confidence(yt_1, yt_2, yt_3, yt_4, yt_5)
             entropy = get_entropy(yt_1, yt_2, yt_3, yt_4, yt_5)
             # consistency = get_consistency(yt_1, yt_2, yt_3, yt_4, yt_5)
             # target_weight = (1 - entropy + 1 - consistency + confidece) / 3
@@ -398,7 +407,7 @@ def validate(val_loader: DataLoader, model: ImageClassifier, esem, source_classe
 
     all_confidece = norm(torch.tensor(all_confidece))
     all_entropy = norm(torch.tensor(all_entropy))
-    all_score = (all_confidece + 1 - all_entropy) / 3
+    all_score = (all_confidece + 1 - all_entropy) / 2
 
     counters = AccuracyCounter(len(source_classes) + 1)
     for (each_indice, each_label, score) in zip(all_indices, all_labels, all_score):
@@ -445,7 +454,7 @@ def evaluate_source_common(val_loader: DataLoader, model: ImageClassifier, esem,
             output, f = model(images)
             output = F.softmax(output, -1) / temperature
             yt_1, yt_2, yt_3, yt_4, yt_5 = esem(f)
-            confidece = get_confidence(yt_1, yt_2, yt_3, yt_4, yt_5)
+            confidece = get_marginal_confidence(yt_1, yt_2, yt_3, yt_4, yt_5)
             entropy = get_entropy(yt_1, yt_2, yt_3, yt_4, yt_5)
             # consistency = get_consistency(yt_1, yt_2, yt_3, yt_4, yt_5)
             # score = (1 - entropy + 1 - consistency + confidece) / 3
@@ -470,7 +479,7 @@ def evaluate_source_common(val_loader: DataLoader, model: ImageClassifier, esem,
     all_confidece = norm(torch.tensor(all_confidece))
     # all_consistency = norm(torch.tensor(all_consistency))
     all_entropy = norm(torch.tensor(all_entropy))
-    all_score = (all_confidece + 1 - all_entropy) / 3
+    all_score = (all_confidece + 1 - all_entropy) / 2
 
     # args.threshold = torch.median(all_score)
     print('source_threshold = {}'.format(args.source_threshold))
@@ -512,7 +521,8 @@ if __name__ == '__main__':
     parser.add_argument('-b', '--batch_size', default=32, type=int, help='mini-batch size (default: 32)')
     parser.add_argument('--lr', '--learning_rate', default=0.01, type=float, help='initial learning rate', dest='lr')
     parser.add_argument('--momentum', default=0.9, type=float, help='momentum')
-    parser.add_argument('--wd', '--weight_decay', default=1e-3, type=float, help='weight decay (default: 1e-3)', dest='weight_decay')
+    parser.add_argument('--wd', '--weight_decay', default=1e-3, type=float, help='weight decay (default: 1e-3)',
+                        dest='weight_decay')
     parser.add_argument('-p', '--print_freq', default=100, type=int, help='print frequency (default: 100)')
     parser.add_argument('--seed', default=None, type=int, help='seed for initializing training. ')
     parser.add_argument('--trade_off', default=1., type=float, help='the trade-off hyper-parameter for transfer loss')

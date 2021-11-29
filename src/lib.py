@@ -217,6 +217,23 @@ def get_confidence(y_1, y_2, y_3, y_4, y_5):
     return confidence
 
 
+def get_marginal_confidence(y_1, y_2, y_3, y_4, y_5):
+    conf_1, _ = torch.topk(y_1, 2, 1)
+    conf_2, _ = torch.topk(y_2, 2, 1)
+    conf_3, _ = torch.topk(y_3, 2, 1)
+    conf_4, _ = torch.topk(y_4, 2, 1)
+    conf_5, _ = torch.topk(y_5, 2, 1)
+
+    conf_1 = conf_1[:, 0] - conf_1[:, 1]
+    conf_2 = conf_2[:, 0] - conf_2[:, 1]
+    conf_3 = conf_3[:, 0] - conf_3[:, 1]
+    conf_4 = conf_4[:, 0] - conf_4[:, 1]
+    conf_5 = conf_5[:, 0] - conf_5[:, 1]
+
+    confidence = (conf_1 + conf_2 + conf_3 + conf_4 + conf_5) / 5
+    return confidence
+
+
 # def norm(t):
 #     mean = torch.mean(t)
 #     var = torch.std(t) ** 2
