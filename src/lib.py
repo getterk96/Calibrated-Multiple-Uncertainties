@@ -217,6 +217,11 @@ def get_confidence(y_1, y_2, y_3, y_4, y_5):
     return confidence
 
 
+def get_vote_confidence(y_1, y_2, y_3, y_4, y_5):
+    confidence, _ = torch.max((y_1 + y_2 + y_3 + y_4 + y_5) / 5, 1)
+    return confidence
+
+
 def get_marginal_confidence(y_1, y_2, y_3, y_4, y_5):
     conf_1, _ = torch.topk(y_1, 2, 1)
     conf_2, _ = torch.topk(y_2, 2, 1)
