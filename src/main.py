@@ -6,6 +6,7 @@ import sys
 import time
 
 import numpy as np
+import pandas as pd
 import torch
 import torch.backends.cudnn as cudnn
 import torch.nn.functional as F
@@ -89,14 +90,15 @@ def main(args: argparse.Namespace):
     classifier = ImageClassifier(backbone, train_source_dataset.num_classes).to(device)
     domain_discri = DomainDiscriminator(in_feature=classifier.features_dim, hidden_size=1024).to(device)
     esem = Ensemble(classifier.features_dim, train_source_dataset.num_classes).to(device)
+    # proto_cls = Cos_Classifier(classifier.features_dim, train_source_dataset.num_classes, scale=4).to(device)
 
     # define optimizer and lr scheduler
     optimizer = SGD(classifier.get_parameters() + domain_discri.get_parameters(),
                     args.lr, momentum=args.momentum, weight_decay=args.weight_decay, nesterov=True)
     lr_scheduler = StepwiseLR(optimizer, init_lr=args.lr, gamma=0.001, decay_rate=0.75)
 
-    optimizer_esem = SGD(esem.parameters(), args.lr, momentum=args.momentum, weight_decay=args.weight_decay,
-                         nesterov=True)
+    optimizer_esem = SGD(esem.get_parameters(), args.lr, momentum=args.momentum,
+                         weight_decay=args.weight_decay, nesterov=True)
     lr_scheduler1 = StepwiseLR(optimizer_esem, init_lr=args.lr, gamma=0.001, decay_rate=0.75)
     lr_scheduler2 = StepwiseLR(optimizer_esem, init_lr=args.lr, gamma=0.001, decay_rate=0.75)
     lr_scheduler3 = StepwiseLR(optimizer_esem, init_lr=args.lr, gamma=0.001, decay_rate=0.75)
@@ -112,39 +114,39 @@ def main(args: argparse.Namespace):
     # define loss function
     domain_adv = DomainAdversarialLoss(domain_discri, reduction='none').to(device)
 
-    _, ds, src = args.source.split('/')
-    _, _, tgt = args.target.split('/')
+    # _, ds, src = args.source.split('/')
+    # _, _, tgt = args.target.split('/')
+    #
+    # if not os.path.exists(f"models/{ds}"):
+    #     os.mkdir(f"models/{ds}")
+    #
+    # pretrain_model_path = f"models/{ds}/scw_{src[:-4]}_{tgt[:-4]}_pretrain.pth"
+    # if not os.path.exists(pretrain_model_path):
+    #     for epoch in range(args.pre_epochs):
+    #         pretrain(train_source_iter, esem_iter1, esem_iter2, esem_iter3, esem_iter4, esem_iter5, classifier,
+    #                  esem, optimizer_pre, args, epoch, lr_scheduler_pre)
+    #
+    #         evaluate_source_common(val_loader, classifier, esem, source_classes, args)
+    #         auc = plot_roc(val_loader, classifier, esem, source_classes, args)
+    #         print(f"Got AUC {auc:.4f}")
+    #
+    #     state = {'classifier': classifier.state_dict(), 'esem': esem.state_dict()}
+    #
+    #     torch.save(state, pretrain_model_path)
+    # else:
+    #     checkpoint = torch.load(pretrain_model_path)
+    #
+    #     classifier.load_state_dict(checkpoint['classifier'])
+    #     esem.load_state_dict(checkpoint['esem'])
+    #
+    #     plot_pr(val_loader, classifier, esem, source_classes, args)
 
-    if not os.path.exists(f"models/{ds}"):
-        os.mkdir(f"models/{ds}")
-
-    pretrain_model_path = f"models/{ds}/scw_{src[:-4]}_{tgt[:-4]}_pretrain.pth"
-    if not os.path.exists(pretrain_model_path):
-        for epoch in range(args.pre_epochs):
-            pretrain(train_source_iter, esem_iter1, esem_iter2, esem_iter3, esem_iter4, esem_iter5, classifier,
-                     esem, optimizer_pre, args, epoch, lr_scheduler_pre)
-
-            source_class_weight = evaluate_source_common(val_loader, classifier, esem, source_classes, args)
-
-        state = {'classifier': classifier.state_dict(), 'esem': esem.state_dict()}
-
-        torch.save(state, pretrain_model_path)
-    else:
-        checkpoint = torch.load(pretrain_model_path)
-
-        classifier.load_state_dict(checkpoint['classifier'])
-        esem.load_state_dict(checkpoint['esem'])
-
-        plot_roc(val_loader, classifier, esem, source_classes, args)
-        # source_class_weight = evaluate_source_common(val_loader, classifier, esem, source_classes, args)
-        exit(0)
-
-    source_class_weight = torch.cat([torch.ones(len(common_classes)), torch.zeros(len(source_private_classes))])
     target_score_upper = torch.zeros(1).to(device)
     target_score_lower = torch.zeros(1).to(device)
     # mask = torch.where(source_class_weight > 0.2)
     # source_class_weight = torch.zeros_like(source_class_weight)
     # source_class_weight[mask] = 1
+    source_class_weight = torch.ones(len(source_classes))
     print(source_class_weight)
 
     # start training
@@ -160,6 +162,8 @@ def main(args: argparse.Namespace):
         train_esem(esem_iter3, classifier, esem, optimizer_esem, lr_scheduler3, epoch, args, index=3)
         train_esem(esem_iter4, classifier, esem, optimizer_esem, lr_scheduler4, epoch, args, index=4)
         train_esem(esem_iter5, classifier, esem, optimizer_esem, lr_scheduler5, epoch, args, index=5)
+
+        source_class_weight = evaluate_source_common(val_loader, classifier, esem, source_classes, args)
 
         # evaluate on validation set
         acc1 = validate(val_loader, classifier, esem, source_classes, args)
@@ -289,7 +293,6 @@ def train(train_source_iter: ForeverDataIterator, train_target_iter: ForeverData
             yt_1, yt_2, yt_3, yt_4, yt_5 = esem(f_t)
             confidence = get_marginal_confidence(yt_1, yt_2, yt_3, yt_4, yt_5)
             entropy = get_entropy(yt_1, yt_2, yt_3, yt_4, yt_5)
-            # consistency = get_consistency(yt_1, yt_2, yt_3, yt_4, yt_5)
             w_t = (1 - entropy + confidence) / 2
             target_score_upper = target_score_upper * 0.01 + w_t.max() * 0.99
             target_score_lower = target_score_lower * 0.01 + w_t.min() * 0.99
@@ -368,8 +371,7 @@ def validate(val_loader: DataLoader, model: ImageClassifier, esem, source_classe
     model.eval()
     esem.eval()
 
-    all_confidece = list()
-    # all_consistency = list()
+    all_confidence = list()
     all_entropy = list()
     all_indices = list()
     all_labels = list()
@@ -383,17 +385,17 @@ def validate(val_loader: DataLoader, model: ImageClassifier, esem, source_classe
             values, indices = torch.max(F.softmax(output, -1), 1)
 
             yt_1, yt_2, yt_3, yt_4, yt_5 = esem(f)
-            confidece = get_marginal_confidence(yt_1, yt_2, yt_3, yt_4, yt_5)
+            confidence = get_marginal_confidence(yt_1, yt_2, yt_3, yt_4, yt_5)
             entropy = get_entropy(yt_1, yt_2, yt_3, yt_4, yt_5)
 
-            all_confidece.extend(confidece)
+            all_confidence.extend(confidence)
             all_entropy.extend(entropy)
             all_indices.extend(indices)
             all_labels.extend(labels)
 
-    all_confidece = norm(torch.tensor(all_confidece))
+    all_confidence = norm(torch.tensor(all_confidence))
     all_entropy = norm(torch.tensor(all_entropy))
-    all_score = (all_confidece + 1 - all_entropy) / 2
+    all_score = (all_confidence + 1 - all_entropy) / 2
 
     counters = AccuracyCounter(len(source_classes) + 1)
     for (each_indice, each_label, score) in zip(all_indices, all_labels, all_score):
@@ -442,8 +444,9 @@ def plot_roc(val_loader: DataLoader, model: ImageClassifier, esem, source_classe
     all_confidence = norm(torch.tensor(all_confidence))
     all_marginal_confidence = norm(torch.tensor(all_marginal_confidence))
     all_entropy = norm(torch.tensor(all_entropy))
-    all_score_a = (all_confidence + 1 - all_entropy) / 2
-    all_score_b = (1 - all_entropy)
+    all_score_a = (all_confidence)
+    all_score_b = (all_marginal_confidence)
+    all_score_c = (1 - all_entropy)
 
     common_labels = []
     for i in range(len(all_labels)):
@@ -451,24 +454,115 @@ def plot_roc(val_loader: DataLoader, model: ImageClassifier, esem, source_classe
 
     all_score_a = all_score_a.numpy()
     all_score_b = all_score_b.numpy()
+    all_score_c = all_score_c.numpy()
     common_labels = np.array(common_labels)
 
-    fpr_a, tpr_a, _ = roc_curve(common_labels, all_score_a, )
+    fpr_a, tpr_a, _ = roc_curve(common_labels, all_score_a)
     fpr_b, tpr_b, _ = roc_curve(common_labels, all_score_b)
+    fpr_c, tpr_c, _ = roc_curve(common_labels, all_score_c)
     roc_auc_a = roc_auc_score(common_labels, all_score_a)
     roc_auc_b = roc_auc_score(common_labels, all_score_b)
+    roc_auc_c = roc_auc_score(common_labels, all_score_c)
 
     source = args.source.split("/")[-1][:-4].capitalize()
     target = args.target.split("/")[-1][:-4].capitalize()
     plt.figure(1)
     plt.plot([0, 1], [0, 1], 'm,-')
-    plt.plot(fpr_a, tpr_a, label=f'AUC Conf+Ent={roc_auc_a: .3f}')
-    plt.plot(fpr_b, tpr_b, label=f'AUC Ent={roc_auc_b: .3f}')
+    plt.plot(fpr_a, tpr_a, label=f'AUC Conf={roc_auc_a: .3f}')
+    plt.plot(fpr_b, tpr_b, label=f'AUC Margin={roc_auc_b: .3f}')
+    plt.plot(fpr_c, tpr_c, label=f'AUC Ent={roc_auc_c: .3f}')
     plt.xlabel('FPR')
     plt.ylabel('TPR')
     plt.title(f'{source}->{target} ROC')
     plt.legend(loc='best')
     plt.savefig(f'ablation/{source}->{target}.png')
+
+
+def cal_pr(scores, labels, thresholds):
+    new_scores = zip(scores.numpy(), labels)
+    new_scores = np.array(sorted(new_scores, key=lambda x: x[0], reverse=True))
+
+    points = []
+    for threshold in thresholds:
+        TP, FP, FN = 0, 0, 0
+        for score, label in new_scores:
+            if score >= threshold:
+                if label:
+                    TP += 1
+                else:
+                    FP += 1
+            else:
+                if label:
+                    FN += 1
+        points.append([TP / (TP + FN + 1e-7), TP / (TP + FP + 1e-7)])
+
+    print_points = [[0., 1.]] + sorted(points, key=lambda x: x[0]) + [[1., 0.]]
+    return list(zip(*print_points)), points
+
+
+def plot_pr(val_loader: DataLoader, model: ImageClassifier, esem, source_classes: list, args: argparse.Namespace):
+    # switch to evaluate mode
+    model.eval()
+    esem.eval()
+
+    all_confidence = list()
+    all_marginal_confidence = list()
+    all_entropy = list()
+    all_labels = list()
+
+    with torch.no_grad():
+        for i, (images, labels) in enumerate(val_loader):
+            images = images.to(device)
+
+            _, f = model(images)
+            yt_1, yt_2, yt_3, yt_4, yt_5 = esem(f)
+            confidence = get_confidence(yt_1, yt_2, yt_3, yt_4, yt_5)
+            marginal_confidence = get_marginal_confidence(yt_1, yt_2, yt_3, yt_4, yt_5)
+            entropy = get_entropy(yt_1, yt_2, yt_3, yt_4, yt_5)
+
+            all_confidence.extend(confidence)
+            all_marginal_confidence.extend(marginal_confidence)
+            all_entropy.extend(entropy)
+            all_labels.extend(labels)
+
+    all_confidence = norm(torch.tensor(all_confidence))
+    all_marginal_confidence = norm(torch.tensor(all_marginal_confidence))
+    all_entropy = norm(torch.tensor(all_entropy))
+    all_scores = [all_confidence, all_marginal_confidence, 1 - all_entropy,
+                  (all_confidence + 1 - all_entropy) / 2,
+                  (all_marginal_confidence + 1 - all_entropy) / 2,
+                  (all_confidence + all_marginal_confidence) / 2,
+                  (all_confidence + all_marginal_confidence + 1 - all_entropy) / 3]
+
+    common_labels = [(1 if label in source_classes else 0) for label in all_labels]
+    common_labels = np.array(common_labels)
+
+    step = 0.05
+    source = args.source.split("/")[-1][:-4].capitalize()
+    target = args.target.split("/")[-1][:-4].capitalize()
+    names = ['Conf', 'Margin', 'Entropy', 'Conf+Entropy', 'Margin+Entropy', 'Conf+Margin', 'Conf+Margin+Entropy']
+    thresholds = [thresh * step for thresh in range(int(1 / step) - 1, -1, -1)]
+
+    plt.figure(1)
+    plt.plot([0, 1], [0, 1], 'm,-')
+    results = []
+    for i, scores in enumerate(all_scores):
+        results.append([])
+        (recall, precision), points = cal_pr(scores, common_labels, thresholds)
+        plt.plot(recall, precision, label=names[i])
+        for j, point in enumerate(points):
+            recall, precision = point
+            results[-1].append((2 * recall * precision) / (recall + precision))
+    columns = []
+    for threshold in thresholds:
+        columns.append(f"T{threshold:.2f}")
+    pd.DataFrame(results, index=names, columns=columns).to_excel(f"ablation/F1-{source}->{target}.xlsx")
+    plt.xlabel('Recall')
+    plt.ylabel('Precision')
+    plt.title(f'{source}->{target} PR')
+    plt.legend(loc='best')
+    plt.savefig(f'ablation/PR-{source}->{target}.png')
+
 
 def evaluate_source_common(val_loader: DataLoader, model: ImageClassifier, esem, source_classes: list,
                            args: argparse.Namespace):
@@ -480,7 +574,7 @@ def evaluate_source_common(val_loader: DataLoader, model: ImageClassifier, esem,
     common = []
     target_private = []
 
-    all_confidece = list()
+    all_confidence = list()
     all_entropy = list()
     all_labels = list()
     all_output = list()
@@ -494,21 +588,20 @@ def evaluate_source_common(val_loader: DataLoader, model: ImageClassifier, esem,
             output, f = model(images)
             output = F.softmax(output, -1) / temperature
             yt_1, yt_2, yt_3, yt_4, yt_5 = esem(f)
-            confidece = get_marginal_confidence(yt_1, yt_2, yt_3, yt_4, yt_5)
+            confidence = get_marginal_confidence(yt_1, yt_2, yt_3, yt_4, yt_5)
             entropy = get_entropy(yt_1, yt_2, yt_3, yt_4, yt_5)
 
-            all_confidece.extend(confidece)
+            all_confidence.extend(confidence)
             all_entropy.extend(entropy)
             all_labels.extend(labels)
 
             for each_output in output:
                 all_output.append(each_output)
 
-    all_confidece = norm(torch.tensor(all_confidece))
+    all_confidence = norm(torch.tensor(all_confidence))
     all_entropy = norm(torch.tensor(all_entropy))
-    all_score = (all_confidece + 1 - all_entropy) / 2
+    all_score = (all_confidence + 1 - all_entropy) / 2
 
-    # args.threshold = torch.median(all_score)
     print('source_threshold = {}'.format(args.source_threshold))
 
     for i in range(len(all_score)):
@@ -540,7 +633,7 @@ if __name__ == '__main__':
     parser.add_argument('-t', '--target', help='target domain(s)')
     parser.add_argument('-a', '--arch', default='resnet50', help='backbone selected')
     parser.add_argument('-j', '--workers', default=4, type=int, help='number of data loading workers (default: 4)')
-    parser.add_argument('--pre_epochs', default=5, type=int, help='number of pretrain epochs to run')
+    parser.add_argument('--pre_epochs', default=2, type=int, help='number of pretrain epochs to run')
     parser.add_argument('--epochs', default=20, type=int, help='number of total epochs to run')
     parser.add_argument('-b', '--batch_size', default=32, type=int, help='mini-batch size (default: 32)')
     parser.add_argument('--lr', '--learning_rate', default=0.01, type=float, help='initial learning rate', dest='lr')

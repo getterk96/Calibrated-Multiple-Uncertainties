@@ -1,13 +1,14 @@
+import math
 from typing import List, Dict, Optional, Any, Tuple
-import torch.nn as nn
-import torch
-import numpy as np
-from torch.autograd import Function
 
+import numpy as np
 import torch
-from torchvision import models
+import torch.nn as nn
+from torch.autograd import Function
 from torch.hub import load_state_dict_from_url
-from torchvision.models.resnet import BasicBlock, Bottleneck, model_urls
+from torch.nn import Parameter
+from torchvision import models
+from torchvision.models.resnet import Bottleneck, model_urls
 
 
 class ResNet(models.ResNet):
@@ -265,11 +266,37 @@ class Ensemble(nn.Module):
 
         return y
 
-
     def get_parameters(self) -> List[Dict]:
         """A parameter list which decides optimization hyper-parameters,
             such as the relative learning rate of each layer
         """
+        params = [
+            {"params": self.parameters(), "lr_mult": 1.},
+        ]
+        return params
+
+
+class Cos_Classifier(nn.Module):
+    def __init__(self, in_dims, out_dims, scale=4):
+        super(Cos_Classifier, self).__init__()
+        self.in_dims = in_dims
+        self.out_dims = out_dims
+        self.scale = scale
+        self.weight = Parameter(torch.Tensor(out_dims, in_dims).cuda())
+        self.reset_parameters()
+        print(f'Cosine Classifier Using Scale: {self.scale}')
+
+    def reset_parameters(self):
+        stdv = 1. / math.sqrt(self.weight.size(1))
+        self.weight.data.uniform_(-stdv, stdv)
+
+    def forward(self, input, *args):
+        eps = 1e-7
+        ex = input / (torch.norm(input, 2, 1, keepdim=True) + eps)
+        ew = self.weight / (torch.norm(self.weight, 2, 1, keepdim=True) + eps)
+        return torch.mm(self.scale * ex, ew.t())
+
+    def get_parameters(self) -> List[Dict]:
         params = [
             {"params": self.parameters(), "lr_mult": 1.},
         ]
