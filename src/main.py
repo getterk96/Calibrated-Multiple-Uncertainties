@@ -143,9 +143,6 @@ def main(args: argparse.Namespace):
 
     target_score_upper = torch.zeros(1).to(device)
     target_score_lower = torch.zeros(1).to(device)
-    # mask = torch.where(source_class_weight > 0.2)
-    # source_class_weight = torch.zeros_like(source_class_weight)
-    # source_class_weight[mask] = 1
     source_class_weight = torch.ones(len(source_classes))
     print(source_class_weight)
 
@@ -164,6 +161,10 @@ def main(args: argparse.Namespace):
         train_esem(esem_iter5, classifier, esem, optimizer_esem, lr_scheduler5, epoch, args, index=5)
 
         source_class_weight = evaluate_source_common(val_loader, classifier, esem, source_classes, args)
+        mask = torch.where(source_class_weight > 0.1)
+        source_class_weight = torch.zeros_like(source_class_weight)
+        source_class_weight[mask] = 1
+        print(source_class_weight)
 
         # evaluate on validation set
         acc1 = validate(val_loader, classifier, esem, source_classes, args)
@@ -647,8 +648,8 @@ if __name__ == '__main__':
     parser.add_argument('--n_share', default=10, type=int, help=" ")
     parser.add_argument('--n_source_private', default=10, type=int, help=" ")
     parser.add_argument('--n_total', default=31, type=int, help=" ")
-    parser.add_argument('--threshold', default=0.5, type=float, help=" ")
-    parser.add_argument('--source_threshold', default=0.5, type=float, help=" ")
+    parser.add_argument('--threshold', default=0.6, type=float, help=" ")
+    parser.add_argument('--source_threshold', default=0.9, type=float, help=" ")
     args = parser.parse_args()
     print(args)
     main(args)
